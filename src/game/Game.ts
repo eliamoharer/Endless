@@ -645,7 +645,7 @@ export class Game {
       {
         kind: "increment",
         name: "Increment",
-        detail: incrementMaxed ? "Numbers max at 8" : `Numbers start at ${spawnValue} now`,
+        detail: incrementMaxed ? "Numbers max at 8" : `Numbers can start at ${spawnValue}`,
         costAmount: incrementCostSpec.amount,
         costValue: incrementCostSpec.value,
         progress: incrementMaxed
