@@ -22,11 +22,18 @@ const mergeThreshold = 10;
 const projectionSkew = 0.28;
 const projectionDepth = 0.54;
 const maxIncrementLevel = 7;
-const spawnRateCosts = [14, 22, 34, 52, 80, 124, 190, 290, 440, 660];
+/** Same economic ladder as increment: tier‑1 table `30 × 10^exponent`, resolved by `resolveUpgradeCost` to ~30 particles of the current digit per step. */
+const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000];
+/** Eleven spawn tiers over ~30 min; exponents 0→6 match increment’s top order so late spawn isn’t pricier than increment in the same currency. */
+const spawnRateCosts = Array.from({ length: 11 }, (_, index) =>
+  Math.max(1, Math.round(30 * 10 ** ((6 * index) / 10))),
+);
 const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26];
 const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46];
-const incrementCosts = [30, 43, 61, 86, 121, 170, 240];
-const speedCosts = [10, 16, 25, 39, 61, 96, 150, 235];
+/** Nine speed tiers on the same ladder (slightly steeper steps than spawn for the same exponent range). */
+const speedCosts = Array.from({ length: 9 }, (_, index) =>
+  Math.max(1, Math.round(30 * 10 ** ((6 * index) / 8))),
+);
 const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36];
 
 export class Game {
@@ -694,6 +701,39 @@ export class Game {
     return this.state.player.clump.filter((particle) => particle.value === value).length;
   }
 
+  /**
+   * If merging removed the last `mergedValue` from the clump while the spawn floor is higher,
+   * any world food still showing that digit is obsolete — bump it (with shockwave) to match play.
+   */
+  private bumpFoodWhenMergedDigitObsoleted(mergedValue: number): void {
+    const spawnFloor = Math.min(this.state.upgrades.incrementLevel + 1, 8);
+
+    if (spawnFloor <= mergedValue) {
+      return;
+    }
+
+    if (this.countParticles(mergedValue) > 0) {
+      return;
+    }
+
+    const target = Math.min(Math.max(mergedValue + 1, spawnFloor), 8);
+
+    for (const food of this.state.foods) {
+      if (food.value !== mergedValue) {
+        continue;
+      }
+
+      food.value = target;
+      food.radius = 28 + Math.sqrt(target) * 3;
+      this.state.shockwaves.push({
+        age: 0,
+        duration: 0.28,
+        origin: { ...food.position },
+        maxRadius: 120 + target * 14,
+      });
+    }
+  }
+
   private performMerge(value: number): void {
     const player = this.state.player;
     const mergeable = player.clump.filter((particle) => particle.value === value).slice(0, mergeThreshold);
@@ -718,6 +758,7 @@ export class Game {
     player.nextParticleId += 1;
     player.discoveredMaxValue = Math.max(player.discoveredMaxValue, nextValue);
     this.updateMergeProgress();
+    this.bumpFoodWhenMergedDigitObsoleted(value);
     this.state.shockwaves.push({
       age: 0,
       duration: 0.48,
