@@ -22,18 +22,16 @@ const mergeThreshold = 10;
 const projectionSkew = 0.28;
 const projectionDepth = 0.54;
 const maxIncrementLevel = 7;
-/** Same economic ladder as increment: tier‑1 table `30 × 10^exponent`, resolved by `resolveUpgradeCost` to ~30 particles of the current digit per step. */
+/**
+ * Upgrade “weight” in tier‑1 table units: one particle of digit d is worth ~10^(d−1) here (1→1, 10→one 2, 100→one 3…).
+ * `resolveUpgradeCost` folds tier‑1 amounts into the current increment digit; late spawn/speed must stay large enough in tier‑1
+ * that they still cost many of that digit — not a single particle — while staying below increment (~30 of current digit).
+ */
 const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000];
-/** Eleven spawn tiers over ~30 min; exponents 0→6 match increment’s top order so late spawn isn’t pricier than increment in the same currency. */
-const spawnRateCosts = Array.from({ length: 11 }, (_, index) =>
-  Math.max(1, Math.round(30 * 10 ** ((6 * index) / 10))),
-);
+const spawnRateCosts = [10, 15, 100, 200, 1000, 1500, 10000, 100000, 1000000, 10000000, 100000000];
 const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26];
 const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46];
-/** Nine speed tiers on the same ladder (slightly steeper steps than spawn for the same exponent range). */
-const speedCosts = Array.from({ length: 9 }, (_, index) =>
-  Math.max(1, Math.round(30 * 10 ** ((6 * index) / 8))),
-);
+const speedCosts = [10, 80, 120, 1100, 80000, 140000, 9000000, 80000000, 1600000000];
 const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36];
 
 export class Game {
@@ -564,8 +562,7 @@ export class Game {
   }
 
   /**
-   * Table costs are in "tier-1 units". Express them in the current increment currency tier only
-   * (never in merged / discovered high digits). Each step up divides by 10, always rounding up.
+   * Fold tier‑1 table amounts into the current increment digit (see file header). Each step up divides by 10, rounding up.
    */
   private resolveUpgradeCost(tableAmount: number): { amount: number; value: number } {
     const maxTier = Math.min(this.state.upgrades.incrementLevel + 1, 8);
