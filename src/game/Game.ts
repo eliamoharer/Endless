@@ -25,7 +25,7 @@ const maxIncrementLevel = 7;
 const spawnRateCosts = [14, 22, 34, 52, 80, 124, 190, 290, 440, 660];
 const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26];
 const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46];
-const incrementCosts = [60, 86, 122, 172, 242, 340, 480];
+const incrementCosts = [30, 43, 61, 86, 121, 170, 240];
 const speedCosts = [10, 16, 25, 39, 61, 96, 150, 235];
 const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36];
 
@@ -56,7 +56,7 @@ export class Game {
       spawnTimer: 0,
       enemies: [],
       nextEnemyId: 1,
-      enemySpawnTimer: 7,
+      enemySpawnTimer: 4,
       shockwaves: [],
       mergeProgresses: [{ value: 1, count: 0, threshold: mergeThreshold, ready: false }],
       mergeCandidateValue: 1,
@@ -149,7 +149,7 @@ export class Game {
     updateClump(this.state.player, dt);
     this.updateShockwaves(dt);
     this.updateMergeProgress();
-    this.enforceEnemyTierProgression();
+    this.enforceObsoletePreviousTierInWorld();
     this.updateUpgradeProgress();
 
     if (this.input.consumeMerge() && this.state.mergeReady) {
@@ -285,7 +285,10 @@ export class Game {
 
     if (this.state.enemySpawnTimer <= 0) {
       this.spawnEnemy();
-      this.state.enemySpawnTimer = 8 + Math.random() * 7;
+      // Slightly faster baseline; extra tick when very few threats so exploration stays populated.
+      const baseInterval = 4 + Math.random() * 5;
+      this.state.enemySpawnTimer =
+        this.state.enemies.length < 2 ? Math.min(baseInterval, 2.5) : baseInterval;
     }
 
     for (const enemy of this.state.enemies) {
@@ -340,10 +343,16 @@ export class Game {
       this.state.enemies = this.state.enemies.filter((enemy) => !expired.has(enemy.id));
     }
 
-    const maximumDistance = Math.hypot(this.viewport.width, this.viewport.height) + 900;
-    this.state.enemies = this.state.enemies.filter(
-      (enemy) => distanceBetween(enemy.position, this.state.camera) < maximumDistance,
-    );
+    // Cull using player OR camera: the camera lags the player, so "distance to camera only" could
+    // delete enemies that are still near the player while moving fast — felt like spawns vanished.
+    const maximumDistance = Math.hypot(this.viewport.width, this.viewport.height) + 1100;
+    this.state.enemies = this.state.enemies.filter((enemy) => {
+      const nearPlayer =
+        distanceBetween(enemy.position, this.state.player.position) < maximumDistance;
+      const nearCamera = distanceBetween(enemy.position, this.state.camera) < maximumDistance;
+
+      return nearPlayer || nearCamera;
+    });
   }
 
   private spawnEnemy(): void {
@@ -351,12 +360,13 @@ export class Game {
     const angle = Math.random() * Math.PI * 2;
     const value = Math.max(1, Math.min(this.state.upgrades.incrementLevel + 1, 8));
     const interestDuration = 5 + Math.random() * 10;
+    const origin = this.state.player.position;
 
     this.state.enemies.push({
       id: this.state.nextEnemyId,
       position: {
-        x: this.state.camera.x + Math.cos(angle) * distance,
-        y: this.state.camera.y + Math.sin(angle) * distance,
+        x: origin.x + Math.cos(angle) * distance,
+        y: origin.y + Math.sin(angle) * distance,
       },
       velocity: { x: 0, y: 0 },
       value,
@@ -483,7 +493,6 @@ export class Game {
   }
 
   private updateUpgradeProgress(): void {
-    const baseCurrencyValue = Math.max(1, this.state.upgrades.incrementLevel + 1);
     const spawnRateLevel = this.state.upgrades.spawnRateLevel;
     const incrementLevel = this.state.upgrades.incrementLevel;
     const speedLevel = this.state.upgrades.speedLevel;
@@ -494,9 +503,9 @@ export class Game {
       spawnRateCosts[Math.min(spawnRateLevel, spawnRateCosts.length - 1)];
     const incrementCostBase = incrementCosts[Math.min(incrementLevel, incrementCosts.length - 1)];
     const speedCostBase = speedCosts[Math.min(speedLevel, speedCosts.length - 1)];
-    const spawnRateCostSpec = this.resolveUpgradeCost(spawnRateCostBase, baseCurrencyValue);
-    const incrementCostSpec = this.resolveUpgradeCost(incrementCostBase, baseCurrencyValue);
-    const speedCostSpec = this.resolveUpgradeCost(speedCostBase, baseCurrencyValue);
+    const spawnRateCostSpec = this.resolveUpgradeCost(spawnRateCostBase);
+    const incrementCostSpec = this.resolveUpgradeCost(incrementCostBase);
+    const speedCostSpec = this.resolveUpgradeCost(speedCostBase);
     const spawnRateMultiplier =
       spawnRateMultipliers[Math.min(spawnRateLevel, spawnRateMultipliers.length - 1)];
     const speedMultiplier = speedMultipliers[Math.min(speedLevel, speedMultipliers.length - 1)];
@@ -547,22 +556,19 @@ export class Game {
     this.state.upgradeProgresses = upgrades;
   }
 
-  private resolveUpgradeCost(amount: number, value: number): { amount: number; value: number } {
-    let currentAmount = amount;
-    let currentValue = value;
-    const maxValue = Math.max(value, this.state.player.discoveredMaxValue);
+  /**
+   * Table costs are in "tier-1 units". Express them in the current increment currency tier only
+   * (never in merged / discovered high digits). Each step up divides by 10, always rounding up.
+   */
+  private resolveUpgradeCost(tableAmount: number): { amount: number; value: number } {
+    const maxTier = Math.min(this.state.upgrades.incrementLevel + 1, 8);
+    let amount = tableAmount;
 
-    while (currentValue < maxValue && this.countParticles(currentValue) === 0) {
-      if (currentAmount < 10) {
-        currentAmount = 1;
-      } else {
-        currentAmount = Math.max(1, Math.ceil(currentAmount / 10));
-      }
-
-      currentValue += 1;
+    for (let tier = 1; tier < maxTier; tier += 1) {
+      amount = amount < 10 ? 1 : Math.max(1, Math.ceil(amount / 10));
     }
 
-    return { amount: currentAmount, value: currentValue };
+    return { amount, value: maxTier };
   }
 
   private spendCurrency(amount: number, value: number): boolean {
@@ -604,10 +610,11 @@ export class Game {
       });
     }
 
-    this.enforceEnemyTierProgression();
+    this.enforceObsoletePreviousTierInWorld();
   }
 
-  private enforceEnemyTierProgression(): void {
+  /** When increment is n and the clump has no (n-1), bump all world (n-1) enemies and food to n. */
+  private enforceObsoletePreviousTierInWorld(): void {
     const incrementLevel = this.state.upgrades.incrementLevel;
     const n = incrementLevel + 1;
 
@@ -636,6 +643,22 @@ export class Game {
         duration: 0.34,
         origin: { ...enemy.position },
         maxRadius: 140 + enemy.value * 16,
+      });
+    }
+
+    for (const food of this.state.foods) {
+      if (food.value !== previousValue) {
+        continue;
+      }
+
+      food.value = Math.min(n, 8);
+      food.radius = 28 + Math.sqrt(food.value) * 3;
+      changed = true;
+      this.state.shockwaves.push({
+        age: 0,
+        duration: 0.3,
+        origin: { ...food.position },
+        maxRadius: 120 + food.value * 14,
       });
     }
 
