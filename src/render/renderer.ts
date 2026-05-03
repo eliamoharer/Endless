@@ -258,7 +258,7 @@ export class CanvasRenderer {
       label,
       screen,
       size,
-      state.time * 33 + enemy.phase * 18,
+      state.time * 22 + enemy.phase * 12,
     );
 
     ctx.save();
@@ -372,7 +372,7 @@ function drawTracingOutline(
   ctx.font = `400 ${size}px ${serifStack}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.strokeStyle = "rgba(216, 230, 229, 0.22)";
+  ctx.strokeStyle = "rgba(216, 230, 229, 0.16)";
   ctx.lineWidth = 0.95;
   ctx.strokeText(text, 0, 0);
 
@@ -383,8 +383,8 @@ function drawTracingOutline(
   for (let i = 0; i < waveCount; i += 1) {
     const brightness = (Math.sin(phase * 0.08 + i * 1.18) + 1) * 0.5;
 
-    ctx.strokeStyle = `rgba(216, 230, 229, ${0.04 + brightness * 0.18})`;
-    ctx.lineWidth = 0.72 + brightness * 0.42;
+    ctx.strokeStyle = `rgba(216, 230, 229, ${0.025 + brightness * 0.12})`;
+    ctx.lineWidth = 0.72 + brightness * 0.35;
     ctx.setLineDash([10, 44]);
     ctx.lineDashOffset = -(phase + i * 17);
     ctx.strokeText(text, 0, 0);

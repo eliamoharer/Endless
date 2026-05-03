@@ -64,7 +64,7 @@ export type MergeProgress = {
   ready: boolean;
 };
 
-export type UpgradeKind = "spawnRate" | "increment" | "speed";
+export type UpgradeKind = "spawnRate" | "increment" | "speed" | "expand";
 
 export type UpgradeProgress = {
   kind: UpgradeKind;
@@ -81,6 +81,7 @@ export type UpgradeState = {
   spawnRateLevel: number;
   incrementLevel: number;
   speedLevel: number;
+  expandLevel: number;
 };
 
 export type GameState = {

@@ -26,29 +26,66 @@ const maxIncrementLevel = 7;
 const MAX_INCREMENT_SPAWN = 8;
 /** Highest clump digit (merges + upgrade prices can use 9 and 10). */
 const MAX_CLUMP_VALUE = 10;
+/** Upgrades never bill as raw 1s only: first merge is 10×1 → one 2, so costs quote from digit 2 even before increment. */
+const MIN_UPGRADE_BILL_DIGIT = 2;
 /**
- * Upgrade table entries are tier‑1 weights W. Payment is the fewest clump coins: largest face value
- * v ≤ MAX_CLUMP_VALUE with W divisible by 10^(v−1), paying (W / 10^(v−1)) copies of v — e.g. W=100 → one 3.
+ * Upgrade cost tables store tier‑1 weights W (value‑1 equivalents: one particle of digit d counts as 10^(d−1)).
+ * Spawn, increment, and speed bill at digit `max(2, min(incrementLevel + 1, MAX_INCREMENT_SPAWN))` — same era as
+ * “Numbers start at N” once N ≥ 2, but at the very start N is still 1 while prices use 2 so e.g. W=10 shows as 1×2.
+ * Exception: `W === 1` with bill digit > 1 bills as 1×1 so the first increment row stays a single 1.
+ * Expand still bills at clump digit 10 only. When `amount` is a multiple of 10, it is folded (20×8 → 2×9) so the UI
+ * matches merge rules.
  */
-const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000];
+const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000].map(cost => cost / 30);
 const spawnRateCosts = [10, 20, 100, 200, 1000, 2000, 10000, 100000, 1000000, 10000000, 100000000];
-const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26];
-const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46];
-const speedCosts = [10, 80, 100, 1000, 80000, 200000, 9000000, 80000000, 2000000000];
-const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36];
+const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26, 36];
+const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46, 56];
+const speedCosts = [10, 80, 100, 1000, 80000, 200000, 9000000, 80000000, 200000000];
+const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36, 2.66];
+const expandCostTier1 = 1_000_000_000; /* always priced as particle(s) of value 10, not payDigit */
+const maxExpandLevel = 1;
 
-function tier1WeightToHighestDenomination(weight: number): { amount: number; value: number } {
+function billTier1WeightAsDigit(
+  weight: number,
+  billDigit: number,
+  options: { relaxUnitOnes: boolean },
+): { amount: number; value: number } {
+  const digit = Math.max(1, Math.min(MAX_CLUMP_VALUE, Math.floor(billDigit)));
   const w = Math.max(0, Math.floor(weight));
+
   if (w === 0) {
+    return { amount: 1, value: digit };
+  }
+
+  if (options.relaxUnitOnes && w === 1 && digit > 1) {
     return { amount: 1, value: 1 };
   }
-  for (let v = MAX_CLUMP_VALUE; v > 1; v -= 1) {
-    const unit = 10 ** (v - 1);
-    if (w % unit === 0) {
-      return { amount: w / unit, value: v };
-    }
+
+  const unit = 10 ** (digit - 1);
+
+  return { amount: Math.max(1, Math.ceil(w / unit)), value: digit };
+}
+
+function normalizeUpgradeCoinDisplay(amount: number, value: number): { amount: number; value: number } {
+  let a = Math.max(1, Math.floor(amount));
+  let v = Math.max(1, Math.floor(value));
+
+  while (v < MAX_CLUMP_VALUE && a >= mergeThreshold && a % mergeThreshold === 0) {
+    a = Math.floor(a / mergeThreshold);
+    v += 1;
   }
-  return { amount: w, value: 1 };
+
+  return { amount: a, value: v };
+}
+
+function billedUpgradeCost(
+  weight: number,
+  billDigit: number,
+  relaxUnitOnes: boolean,
+): { amount: number; value: number } {
+  const raw = billTier1WeightAsDigit(weight, billDigit, { relaxUnitOnes });
+
+  return normalizeUpgradeCoinDisplay(raw.amount, raw.value);
 }
 
 export class Game {
@@ -87,6 +124,7 @@ export class Game {
         spawnRateLevel: 0,
         incrementLevel: 0,
         speedLevel: 0,
+        expandLevel: 0,
       },
       upgradeProgresses: [],
     };
@@ -135,8 +173,10 @@ export class Game {
 
       this.state.upgrades.incrementLevel += 1;
       this.convertOutdatedFood(this.state.upgrades.incrementLevel + 1);
-    } else {
+    } else if (kind === "speed") {
       this.state.upgrades.speedLevel += 1;
+    } else if (kind === "expand") {
+      this.state.upgrades.expandLevel += 1;
     }
 
     this.updateMergeProgress();
@@ -172,6 +212,7 @@ export class Game {
     this.updateShockwaves(dt);
     this.updateMergeProgress();
     this.enforceObsoletePreviousTierInWorld();
+    this.bumpOrphanedFoodToIncrementFloor();
     this.updateUpgradeProgress();
 
     if (this.input.consumeMerge() && this.state.mergeReady) {
@@ -442,7 +483,44 @@ export class Game {
         origin: { ...enemy.position },
         maxRadius: 130 + enemy.value * 18,
       });
+
+      this.stripStragglerOnesBelowSpawnFloor();
+      this.enforceObsoletePreviousTierInWorld();
+      this.bumpOrphanedFoodToIncrementFloor();
     }
+  }
+
+  /** Food below the increment spawn floor with no matching particles left in the clump bumps to the floor (enemy minus, etc.). */
+  private bumpOrphanedFoodToIncrementFloor(): void {
+    const baseValue = Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN);
+
+    for (const food of this.state.foods) {
+      if (food.value >= baseValue) {
+        continue;
+      }
+
+      if (this.countParticles(food.value) > 0) {
+        continue;
+      }
+
+      food.value = baseValue;
+      food.radius = 28 + Math.sqrt(food.value) * 3;
+      this.state.shockwaves.push({
+        age: 0,
+        duration: 0.3,
+        origin: { ...food.position },
+        maxRadius: 120 + food.value * 14,
+      });
+    }
+  }
+
+  /** When spawn floor is above 1, remove lone 1s left after minus hits (e.g. 4 − 3) so they do not linger. */
+  private stripStragglerOnesBelowSpawnFloor(): void {
+    if (this.state.upgrades.incrementLevel + 1 <= 1) {
+      return;
+    }
+
+    this.state.player.clump = this.state.player.clump.filter((particle) => particle.value !== 1);
   }
 
   private subtractPlayerMass(amount: number): number {
@@ -494,8 +572,12 @@ export class Game {
     let candidate = 1;
 
     for (let value = this.state.player.discoveredMaxValue; value >= 1; value -= 1) {
+      if (value >= 10) {
+        continue;
+      }
+
       const count = this.countParticles(value);
-      const ready = value < MAX_CLUMP_VALUE && count >= mergeThreshold;
+      const ready = count >= mergeThreshold;
 
       progresses.push({
         value,
@@ -509,6 +591,13 @@ export class Game {
       }
     }
 
+    if (progresses.length === 0) {
+      this.state.mergeProgresses = [];
+      this.state.mergeCandidateValue = 1;
+      this.state.mergeReady = false;
+      return;
+    }
+
     this.state.mergeProgresses = progresses;
     this.state.mergeCandidateValue = candidate;
     this.state.mergeReady = progresses.some((progress) => progress.ready);
@@ -518,16 +607,23 @@ export class Game {
     const spawnRateLevel = this.state.upgrades.spawnRateLevel;
     const incrementLevel = this.state.upgrades.incrementLevel;
     const speedLevel = this.state.upgrades.speedLevel;
+    const expandLevel = this.state.upgrades.expandLevel;
     const spawnRateMaxed = spawnRateLevel >= spawnRateCosts.length;
     const incrementMaxed = incrementLevel >= maxIncrementLevel;
     const speedMaxed = speedLevel >= speedCosts.length;
+    const expandMaxed = expandLevel >= maxExpandLevel;
     const spawnRateCostBase =
       spawnRateCosts[Math.min(spawnRateLevel, spawnRateCosts.length - 1)];
     const incrementCostBase = incrementCosts[Math.min(incrementLevel, incrementCosts.length - 1)];
     const speedCostBase = speedCosts[Math.min(speedLevel, speedCosts.length - 1)];
-    const spawnRateCostSpec = tier1WeightToHighestDenomination(spawnRateCostBase);
-    const incrementCostSpec = tier1WeightToHighestDenomination(incrementCostBase);
-    const speedCostSpec = tier1WeightToHighestDenomination(speedCostBase);
+    const spawnBillDigit = Math.min(
+      Math.max(incrementLevel + 1, MIN_UPGRADE_BILL_DIGIT),
+      MAX_INCREMENT_SPAWN,
+    );
+    const spawnRateCostSpec = billedUpgradeCost(spawnRateCostBase, spawnBillDigit, true);
+    const incrementCostSpec = billedUpgradeCost(incrementCostBase, spawnBillDigit, true);
+    const speedCostSpec = billedUpgradeCost(speedCostBase, spawnBillDigit, true);
+    const expandCostSpec = billedUpgradeCost(expandCostTier1, MAX_CLUMP_VALUE, false);
     const spawnRateMultiplier =
       spawnRateMultipliers[Math.min(spawnRateLevel, spawnRateMultipliers.length - 1)];
     const speedMultiplier = speedMultipliers[Math.min(speedLevel, speedMultipliers.length - 1)];
@@ -572,6 +668,19 @@ export class Game {
         canPurchase:
           !speedMaxed && this.countParticles(speedCostSpec.value) >= speedCostSpec.amount,
         isMaxed: speedMaxed,
+      },
+      {
+        kind: "expand",
+        name: "Expand",
+        detail: "(coming soon)",
+        costAmount: expandCostSpec.amount,
+        costValue: expandCostSpec.value,
+        progress: expandMaxed
+          ? 1
+          : Math.min(this.countParticles(expandCostSpec.value) / expandCostSpec.amount, 1),
+        canPurchase:
+          !expandMaxed && this.countParticles(expandCostSpec.value) >= expandCostSpec.amount,
+        isMaxed: expandMaxed,
       },
     ];
 
