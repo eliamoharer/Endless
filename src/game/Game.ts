@@ -22,17 +22,34 @@ const mergeThreshold = 10;
 const projectionSkew = 0.28;
 const projectionDepth = 0.54;
 const maxIncrementLevel = 7;
+/** Highest digit n for spawn / enemies / food floor (increment cap). */
+const MAX_INCREMENT_SPAWN = 8;
+/** Highest clump digit (merges + upgrade prices can use 9 and 10). */
+const MAX_CLUMP_VALUE = 10;
 /**
- * Upgrade “weight” in tier‑1 table units: one particle of digit d is worth ~10^(d−1) here (1→1, 10→one 2, 100→one 3…).
- * `resolveUpgradeCost` folds tier‑1 amounts into the current increment digit; late spawn/speed must stay large enough in tier‑1
- * that they still cost many of that digit — not a single particle — while staying below increment (~30 of current digit).
+ * Upgrade table entries are tier‑1 weights W. Payment is the fewest clump coins: largest face value
+ * v ≤ MAX_CLUMP_VALUE with W divisible by 10^(v−1), paying (W / 10^(v−1)) copies of v — e.g. W=100 → one 3.
  */
 const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000];
-const spawnRateCosts = [10, 15, 100, 200, 1000, 1500, 10000, 100000, 1000000, 10000000, 100000000];
+const spawnRateCosts = [10, 20, 100, 200, 1000, 2000, 10000, 100000, 1000000, 10000000, 100000000];
 const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26];
 const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46];
-const speedCosts = [10, 80, 120, 1100, 80000, 140000, 9000000, 80000000, 1600000000];
+const speedCosts = [10, 80, 100, 1000, 80000, 200000, 9000000, 80000000, 2000000000];
 const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36];
+
+function tier1WeightToHighestDenomination(weight: number): { amount: number; value: number } {
+  const w = Math.max(0, Math.floor(weight));
+  if (w === 0) {
+    return { amount: 1, value: 1 };
+  }
+  for (let v = MAX_CLUMP_VALUE; v > 1; v -= 1) {
+    const unit = 10 ** (v - 1);
+    if (w % unit === 0) {
+      return { amount: w / unit, value: v };
+    }
+  }
+  return { amount: w, value: 1 };
+}
 
 export class Game {
   private readonly input = new InputController();
@@ -249,7 +266,7 @@ export class Game {
   }
 
   private currentSpawnValue(): number {
-    const baseValue = Math.min(this.state.upgrades.incrementLevel + 1, 8);
+    const baseValue = Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN);
 
     for (let value = 1; value < baseValue; value += 1) {
       const count = this.countParticles(value);
@@ -363,7 +380,7 @@ export class Game {
   private spawnEnemy(): void {
     const distance = Math.hypot(this.viewport.width, this.viewport.height) * 0.58 + 280;
     const angle = Math.random() * Math.PI * 2;
-    const value = Math.max(1, Math.min(this.state.upgrades.incrementLevel + 1, 8));
+    const value = Math.max(1, Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN));
     const interestDuration = 5 + Math.random() * 10;
     const origin = this.state.player.position;
 
@@ -478,7 +495,7 @@ export class Game {
 
     for (let value = this.state.player.discoveredMaxValue; value >= 1; value -= 1) {
       const count = this.countParticles(value);
-      const ready = count >= mergeThreshold;
+      const ready = value < MAX_CLUMP_VALUE && count >= mergeThreshold;
 
       progresses.push({
         value,
@@ -508,13 +525,13 @@ export class Game {
       spawnRateCosts[Math.min(spawnRateLevel, spawnRateCosts.length - 1)];
     const incrementCostBase = incrementCosts[Math.min(incrementLevel, incrementCosts.length - 1)];
     const speedCostBase = speedCosts[Math.min(speedLevel, speedCosts.length - 1)];
-    const spawnRateCostSpec = this.resolveUpgradeCost(spawnRateCostBase);
-    const incrementCostSpec = this.resolveUpgradeCost(incrementCostBase);
-    const speedCostSpec = this.resolveUpgradeCost(speedCostBase);
+    const spawnRateCostSpec = tier1WeightToHighestDenomination(spawnRateCostBase);
+    const incrementCostSpec = tier1WeightToHighestDenomination(incrementCostBase);
+    const speedCostSpec = tier1WeightToHighestDenomination(speedCostBase);
     const spawnRateMultiplier =
       spawnRateMultipliers[Math.min(spawnRateLevel, spawnRateMultipliers.length - 1)];
     const speedMultiplier = speedMultipliers[Math.min(speedLevel, speedMultipliers.length - 1)];
-    const spawnValue = Math.min(incrementLevel + 1, 8);
+    const spawnValue = Math.min(incrementLevel + 1, MAX_INCREMENT_SPAWN);
     const upgrades: UpgradeProgress[] = [
       {
         kind: "spawnRate",
@@ -559,20 +576,6 @@ export class Game {
     ];
 
     this.state.upgradeProgresses = upgrades;
-  }
-
-  /**
-   * Fold tier‑1 table amounts into the current increment digit (see file header). Each step up divides by 10, rounding up.
-   */
-  private resolveUpgradeCost(tableAmount: number): { amount: number; value: number } {
-    const maxTier = Math.min(this.state.upgrades.incrementLevel + 1, 8);
-    let amount = tableAmount;
-
-    for (let tier = 1; tier < maxTier; tier += 1) {
-      amount = amount < 10 ? 1 : Math.max(1, Math.ceil(amount / 10));
-    }
-
-    return { amount, value: maxTier };
   }
 
   private spendCurrency(amount: number, value: number): boolean {
@@ -639,7 +642,7 @@ export class Game {
         continue;
       }
 
-      enemy.value = Math.min(n, 8);
+      enemy.value = Math.min(n, MAX_INCREMENT_SPAWN);
       enemy.radius = radiusForValue(enemy.value) + 8;
       changed = true;
       this.state.shockwaves.push({
@@ -655,7 +658,7 @@ export class Game {
         continue;
       }
 
-      food.value = Math.min(n, 8);
+      food.value = Math.min(n, MAX_INCREMENT_SPAWN);
       food.radius = 28 + Math.sqrt(food.value) * 3;
       changed = true;
       this.state.shockwaves.push({
@@ -703,7 +706,7 @@ export class Game {
    * any world food still showing that digit is obsolete — bump it (with shockwave) to match play.
    */
   private bumpFoodWhenMergedDigitObsoleted(mergedValue: number): void {
-    const spawnFloor = Math.min(this.state.upgrades.incrementLevel + 1, 8);
+    const spawnFloor = Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN);
 
     if (spawnFloor <= mergedValue) {
       return;
@@ -713,7 +716,7 @@ export class Game {
       return;
     }
 
-    const target = Math.min(Math.max(mergedValue + 1, spawnFloor), 8);
+    const target = Math.min(Math.max(mergedValue + 1, spawnFloor), MAX_INCREMENT_SPAWN);
 
     for (const food of this.state.foods) {
       if (food.value !== mergedValue) {
@@ -732,6 +735,10 @@ export class Game {
   }
 
   private performMerge(value: number): void {
+    if (value >= MAX_CLUMP_VALUE) {
+      return;
+    }
+
     const player = this.state.player;
     const mergeable = player.clump.filter((particle) => particle.value === value).slice(0, mergeThreshold);
 
