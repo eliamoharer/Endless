@@ -133,6 +133,10 @@ export function resolveEnemyCollisions(state: GameState): void {
       continue;
     }
 
+    if (state.player.clump.length === 0) {
+      continue;
+    }
+
     const distance = distanceToClump(enemy.position, state.player);
 
     if (distance > enemy.radius) {
@@ -140,6 +144,10 @@ export function resolveEnemyCollisions(state: GameState): void {
     }
 
     const consumed = subtractPlayerMass(state.player, enemy.value);
+
+    if (consumed <= 0) {
+      continue;
+    }
 
     if (consumed >= enemy.value) {
       state.enemies.splice(index, 1);
