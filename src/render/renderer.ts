@@ -31,8 +31,11 @@ export class CanvasRenderer {
   private vignettePerfStreak = 0;
   private vignetteWarmupFrames = VIGNETTE_WARMUP_FRAMES;
   private lastRenderTimestamp = 0;
-  /** Fewer grid fills + no shockwave rings on small touch screens (was choppy). */
-  private reducedWorldDecor = false;
+  /**
+   * Radial gradients on a small offscreen canvas often show as concentric brightness
+   * rings on phone GPUs; skip the vignette entirely there (solid void only).
+   */
+  private omitVignette = false;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const context = canvas.getContext("2d");
@@ -61,17 +64,20 @@ export class CanvasRenderer {
 
     const viewport: Viewport = { width, height, pixelRatio };
 
-    this.reducedWorldDecor = Math.min(width, height) < 760;
+    this.omitVignette = Math.min(width, height) < 760;
 
-    if (!this.prefersReducedMotion.matches) {
+    if (this.prefersReducedMotion.matches || this.omitVignette) {
+      this.vignetteDrawEnabled = false;
+      this.vignetteLayer = null;
+      this.vignettePerfStreak = 0;
+      this.vignetteWarmupFrames = VIGNETTE_WARMUP_FRAMES;
+      this.lastRenderTimestamp = 0;
+    } else {
       this.vignetteDrawEnabled = true;
       this.vignettePerfStreak = 0;
       this.vignetteWarmupFrames = VIGNETTE_WARMUP_FRAMES;
       this.lastRenderTimestamp = 0;
       this.rebuildVignetteLayer(viewport);
-    } else {
-      this.vignetteDrawEnabled = false;
-      this.vignetteLayer = null;
     }
 
     return viewport;
@@ -101,7 +107,7 @@ export class CanvasRenderer {
   private updateVignetteFromFrameTiming(): void {
     const now = performance.now();
 
-    if (this.vignetteDrawEnabled && !this.prefersReducedMotion.matches) {
+    if (this.vignetteDrawEnabled && !this.prefersReducedMotion.matches && !this.omitVignette) {
       if (this.lastRenderTimestamp > 0) {
         const frameMs = now - this.lastRenderTimestamp;
 
@@ -182,11 +188,11 @@ export class CanvasRenderer {
     ctx.fillStyle = "#0a0a0a";
     ctx.fillRect(0, 0, viewport.width, viewport.height);
 
-    if (this.vignetteDrawEnabled && this.vignetteLayer) {
+    if (!this.omitVignette && this.vignetteDrawEnabled && this.vignetteLayer) {
       ctx.drawImage(this.vignetteLayer, 0, 0, viewport.width, viewport.height);
     }
 
-    const spacing = this.reducedWorldDecor ? 92 : 66;
+    const spacing = 66;
     const worldLeft = state.camera.x - viewport.width * 1.2;
     const worldRight = state.camera.x + viewport.width * 1.2;
     const worldTop = state.camera.y - viewport.height * 1.75;
@@ -235,16 +241,14 @@ export class CanvasRenderer {
       }
     }
 
-    if (!this.reducedWorldDecor) {
-      for (const row of nodes) {
-        for (const node of row) {
-          const alpha = Math.min(0.08 + node.tension / 180, 0.34);
+    for (const row of nodes) {
+      for (const node of row) {
+        const alpha = Math.min(0.08 + node.tension / 180, 0.34);
 
-          ctx.fillStyle = `rgba(216, 230, 229, ${alpha})`;
-          ctx.beginPath();
-          ctx.arc(node.bent.x, node.bent.y, 1.15 + Math.min(node.tension / 60, 0.9), 0, Math.PI * 2);
-          ctx.fill();
-        }
+        ctx.fillStyle = `rgba(216, 230, 229, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(node.bent.x, node.bent.y, 1.15 + Math.min(node.tension / 60, 0.9), 0, Math.PI * 2);
+        ctx.fill();
       }
     }
 
@@ -306,10 +310,6 @@ export class CanvasRenderer {
     state: GameState,
     viewport: Viewport,
   ): void {
-    if (this.reducedWorldDecor) {
-      return;
-    }
-
     for (const shockwave of state.shockwaves) {
       const progress = Math.min(shockwave.age / shockwave.duration, 1);
       const screen = this.worldToScreen(shockwave.origin, state, viewport);
