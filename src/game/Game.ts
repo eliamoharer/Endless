@@ -1,95 +1,27 @@
-import { addParticleToClump, currentClumpRadius, radiusForValue, updateClump } from "./clumpPhysics";
+import { updateClump } from "./player/clumpPhysics";
+import { mergeThreshold } from "./constants/balance";
+import { spendCurrency, updateUpgradeProgress, maxIncrementLevel } from "./economy/upgrades";
+import { updateShockwaves } from "./fx/shockwaves";
 import { InputController } from "./input";
-import { createFood } from "./spawning";
-import type {
-  ClumpParticle,
-  Food,
-  GameState,
-  MergeProgress,
-  UpgradeKind,
-  UpgradeProgress,
-  Vec2,
-  Viewport,
-} from "./types";
+import { performMerge, updateMergeProgress } from "./merge/mergeState";
+import { updateCamera, updatePlayerMovement } from "./player/playerMotion";
+import type { GameState, UpgradeKind, Viewport } from "./types";
+import { absorbFood, cullDistantFood, updateFoodSpawning } from "./world/foodCycle";
+import { resolveEnemyCollisions, updateEnemies } from "./world/enemyCycle";
+import {
+  bumpOrphanedFoodToIncrementFloor,
+  convertOutdatedFood,
+  enforceObsoletePreviousTierInWorld,
+} from "./world/worldTierSync";
 import { CanvasRenderer } from "../render/renderer";
 import { GameOverlay } from "../ui/overlay";
 
-const basePlayerSpeed = 270;
-const enemySpeed = 220;
-const enemyWanderSpeed = 86;
-const enemyLockRange = 430;
-const mergeThreshold = 10;
-const projectionSkew = 0.28;
-const projectionDepth = 0.54;
-const maxIncrementLevel = 7;
-/** Highest digit n for spawn / enemies / food floor (increment cap). */
-const MAX_INCREMENT_SPAWN = 8;
-/** Highest clump digit (merges + upgrade prices can use 9 and 10). */
-const MAX_CLUMP_VALUE = 10;
-/** Upgrades never bill as raw 1s only: first merge is 10×1 → one 2, so costs quote from digit 2 even before increment. */
-const MIN_UPGRADE_BILL_DIGIT = 2;
 /**
- * Upgrade cost tables store tier‑1 weights W (value‑1 equivalents: one particle of digit d counts as 10^(d−1)).
- * Spawn, increment, and speed bill at digit `max(2, min(incrementLevel + 1, MAX_INCREMENT_SPAWN))` — same era as
- * “Numbers start at N” once N ≥ 2, but at the very start N is still 1 while prices use 2 so e.g. W=10 shows as 1×2.
- * Exception: `W === 1` with bill digit > 1 bills as 1×1 so the first increment row stays a single 1.
- * Expand still bills at clump digit 10 only. When `amount` is a multiple of 10, it is folded (20×8 → 2×9) so the UI
- * matches merge rules.
+ * Top-level game loop and wiring. Domain logic lives in `constants/`, `core/`, `player/`, `world/`,
+ * `economy/`, `merge/`, `combat/`, and `fx/` so new modes/maps can plug in without growing this file.
  */
-const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000];
-const spawnRateCosts = [10, 20, 100, 200, 1000, 2000, 10000, 100000, 1000000, 10000000, 100000000];
-const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26, 36];
-const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46, 56];
-const speedCosts = [10, 80, 100, 1000, 80000, 200000, 9000000, 80000000, 200000000];
-const speedMultipliers = [1, 1.14, 1.29, 1.45, 1.62, 1.8, 1.99, 2.18, 2.36, 2.66];
-const expandCostTier1 = 1_000_000_000; /* always priced as particle(s) of value 10, not payDigit */
-const maxExpandLevel = 1;
-
-function billTier1WeightAsDigit(
-  weight: number,
-  billDigit: number,
-  options: { relaxUnitOnes: boolean },
-): { amount: number; value: number } {
-  const digit = Math.max(1, Math.min(MAX_CLUMP_VALUE, Math.floor(billDigit)));
-  const w = Math.max(0, Math.floor(weight));
-
-  if (w === 0) {
-    return { amount: 1, value: digit };
-  }
-
-  if (options.relaxUnitOnes && w === 1 && digit > 1) {
-    return { amount: 1, value: 1 };
-  }
-
-  const unit = 10 ** (digit - 1);
-
-  return { amount: Math.max(1, Math.ceil(w / unit)), value: digit };
-}
-
-function normalizeUpgradeCoinDisplay(amount: number, value: number): { amount: number; value: number } {
-  let a = Math.max(1, Math.floor(amount));
-  let v = Math.max(1, Math.floor(value));
-
-  while (v < MAX_CLUMP_VALUE && a >= mergeThreshold && a % mergeThreshold === 0) {
-    a = Math.floor(a / mergeThreshold);
-    v += 1;
-  }
-
-  return { amount: a, value: v };
-}
-
-function billedUpgradeCost(
-  weight: number,
-  billDigit: number,
-  relaxUnitOnes: boolean,
-): { amount: number; value: number } {
-  const raw = billTier1WeightAsDigit(weight, billDigit, { relaxUnitOnes });
-
-  return normalizeUpgradeCoinDisplay(raw.amount, raw.value);
-}
-
 export class Game {
-  private readonly input = new InputController();
+  private readonly input: InputController;
   private readonly state: GameState;
   private viewport: Viewport;
   private animationFrame = 0;
@@ -98,7 +30,9 @@ export class Game {
   constructor(
     private readonly renderer: CanvasRenderer,
     private readonly overlay: GameOverlay,
+    pointerRoot: HTMLElement,
   ) {
+    this.input = new InputController(pointerRoot);
     this.viewport = this.renderer.resize();
     this.state = {
       time: 0,
@@ -129,7 +63,7 @@ export class Game {
       upgradeProgresses: [],
     };
 
-    this.updateUpgradeProgress();
+    updateUpgradeProgress(this.state);
     window.addEventListener("resize", this.handleResize);
   }
 
@@ -146,17 +80,14 @@ export class Game {
 
   requestMerge(): void {
     if (this.state.mergeReady) {
-      this.performMerge(this.state.mergeCandidateValue);
+      performMerge(this.state, this.state.mergeCandidateValue);
     }
   }
 
   requestUpgrade(kind: UpgradeKind): void {
     const upgrade = this.state.upgradeProgresses.find((progress) => progress.kind === kind);
 
-    if (
-      !upgrade?.canPurchase ||
-      !this.spendCurrency(upgrade.costAmount, upgrade.costValue)
-    ) {
+    if (!upgrade?.canPurchase || !spendCurrency(this.state, upgrade.costAmount, upgrade.costValue)) {
       return;
     }
 
@@ -172,15 +103,15 @@ export class Game {
       }
 
       this.state.upgrades.incrementLevel += 1;
-      this.convertOutdatedFood(this.state.upgrades.incrementLevel + 1);
+      convertOutdatedFood(this.state, this.state.upgrades.incrementLevel + 1);
     } else if (kind === "speed") {
       this.state.upgrades.speedLevel += 1;
     } else if (kind === "expand") {
       this.state.upgrades.expandLevel += 1;
     }
 
-    this.updateMergeProgress();
-    this.updateUpgradeProgress();
+    updateMergeProgress(this.state);
+    updateUpgradeProgress(this.state);
   }
 
   private readonly handleResize = (): void => {
@@ -201,752 +132,22 @@ export class Game {
   private update(dt: number): void {
     this.state.time += dt;
 
-    this.updatePlayerMovement(dt);
-    this.updateCamera(dt);
-    this.cullDistantFood();
-    this.updateFoodSpawning(dt);
-    this.updateEnemies(dt);
-    this.absorbFood();
-    this.resolveEnemyCollisions();
+    updatePlayerMovement(this.state, this.input.snapshot(), dt);
+    updateCamera(this.state, dt);
+    cullDistantFood(this.state, this.viewport);
+    updateFoodSpawning(this.state, this.viewport, dt);
+    updateEnemies(this.state, this.viewport, dt);
+    absorbFood(this.state);
+    resolveEnemyCollisions(this.state);
     updateClump(this.state.player, dt);
-    this.updateShockwaves(dt);
-    this.updateMergeProgress();
-    this.enforceObsoletePreviousTierInWorld();
-    this.bumpOrphanedFoodToIncrementFloor();
-    this.updateUpgradeProgress();
+    updateShockwaves(this.state, dt);
+    updateMergeProgress(this.state);
+    enforceObsoletePreviousTierInWorld(this.state);
+    bumpOrphanedFoodToIncrementFloor(this.state);
+    updateUpgradeProgress(this.state);
 
     if (this.input.consumeMerge() && this.state.mergeReady) {
-      this.performMerge(this.state.mergeCandidateValue);
+      performMerge(this.state, this.state.mergeCandidateValue);
     }
   }
-
-  private updatePlayerMovement(dt: number): void {
-    const input = this.input.snapshot();
-    const player = this.state.player;
-    const playerSpeed = this.currentPlayerSpeed();
-    const screenVelocity = {
-      x: input.moveX * playerSpeed,
-      y: input.moveY * playerSpeed,
-    };
-    const worldVelocityY = screenVelocity.y / projectionDepth;
-    const worldVelocityX = screenVelocity.x - projectionSkew * worldVelocityY;
-
-    player.velocity.x = worldVelocityX;
-    player.velocity.y = worldVelocityY;
-    player.position.x += player.velocity.x * dt;
-    player.position.y += player.velocity.y * dt;
-  }
-
-  private updateCamera(dt: number): void {
-    const follow = Math.min(dt * 10, 1);
-
-    this.state.camera.x += (this.state.player.position.x - this.state.camera.x) * follow;
-    this.state.camera.y += (this.state.player.position.y - this.state.camera.y) * follow;
-  }
-
-  private absorbFood(): void {
-    for (let index = this.state.foods.length - 1; index >= 0; index -= 1) {
-      const food = this.state.foods[index];
-      const distance = distanceToClump(food.position, this.state.player);
-
-      if (distance <= food.radius) {
-        const wasGhost = this.state.player.clump.length === 0;
-
-        addParticleToClump(this.state.player, food.position, food.value);
-        this.state.player.discoveredMaxValue = Math.max(
-          this.state.player.discoveredMaxValue,
-          food.value,
-        );
-        this.state.foods.splice(index, 1);
-
-        if (wasGhost) {
-          const offset = {
-            x: food.position.x - this.state.player.position.x,
-            y: food.position.y - this.state.player.position.y,
-          };
-
-          this.state.shockwaves.push({
-            age: 0,
-            duration: 0.42,
-            origin: { ...this.state.player.position },
-            maxRadius: 180,
-            anchor: "player",
-            offset,
-          });
-        }
-      }
-    }
-  }
-
-  private cullDistantFood(): void {
-    const maximumDistance = Math.hypot(this.viewport.width, this.viewport.height) + 900;
-
-    this.state.foods = this.state.foods.filter(
-      (food) => distanceBetween(food.position, this.state.camera) < maximumDistance,
-    );
-  }
-
-  private updateFoodSpawning(dt: number): void {
-    const targetFoodCount =
-      spawnCaps[Math.min(this.state.upgrades.spawnRateLevel, spawnCaps.length - 1)];
-
-    if (this.state.foods.length >= targetFoodCount) {
-      return;
-    }
-
-    this.state.spawnTimer -= dt;
-
-    if (this.state.spawnTimer > 0) {
-      return;
-    }
-
-    const spawnValue = this.currentSpawnValue();
-    this.state.foods.push(createFood(this.state.nextFoodId, this.state.camera, this.viewport, spawnValue));
-    this.state.nextFoodId += 1;
-    this.state.spawnTimer = this.nextSpawnInterval();
-  }
-
-  private currentSpawnValue(): number {
-    const baseValue = Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN);
-
-    for (let value = 1; value < baseValue; value += 1) {
-      const count = this.countParticles(value);
-
-      if (count > 0 && count < mergeThreshold) {
-        return value;
-      }
-    }
-
-    return baseValue;
-  }
-
-  private nextSpawnInterval(): number {
-    const level = this.state.upgrades.spawnRateLevel;
-    const valueAcceleration = 1 + (this.state.player.discoveredMaxValue - 1) * 0.1;
-    const multiplier =
-      spawnRateMultipliers[Math.min(level, spawnRateMultipliers.length - 1)] * valueAcceleration;
-
-    return Math.max(0.5, 12.8 / multiplier);
-  }
-
-  private currentPlayerSpeed(): number {
-    const totalMass = this.state.player.clump.reduce((mass, particle) => mass + particle.value, 0);
-    const massDrag = 1 + totalMass / 62;
-    const speedUpgrade =
-      speedMultipliers[Math.min(this.state.upgrades.speedLevel, speedMultipliers.length - 1)];
-    const lowMassCap = 255 + Math.sqrt(totalMass) * 19 + Math.min(totalMass, 80) * 0.85;
-    const rawSpeed = (basePlayerSpeed * speedUpgrade) / massDrag;
-
-    return Math.max(128, Math.min(rawSpeed, lowMassCap));
-  }
-
-  private updateEnemies(dt: number): void {
-    const playerHasMass = this.state.player.clump.length > 0;
-    const expiredIds: number[] = [];
-
-    this.state.enemySpawnTimer -= dt;
-
-    if (this.state.enemySpawnTimer <= 0) {
-      this.spawnEnemy();
-      // Slightly faster baseline; extra tick when very few threats so exploration stays populated.
-      const baseInterval = 4 + Math.random() * 5;
-      this.state.enemySpawnTimer =
-        this.state.enemies.length < 2 ? Math.min(baseInterval, 2.5) : baseInterval;
-    }
-
-    for (const enemy of this.state.enemies) {
-      if (!playerHasMass && enemy.mode === "chase") {
-        enemy.mode = "wander";
-        enemy.wanderDirection = randomDirection();
-        enemy.wanderTimer = 1 + Math.random() * 2.5;
-      }
-
-      if (enemy.mode === "wander") {
-        enemy.wanderTimer -= dt;
-
-        if (enemy.wanderTimer <= 0) {
-          enemy.wanderDirection = randomDirection();
-          enemy.wanderTimer = 1.4 + Math.random() * 3.2;
-        }
-
-        if (playerHasMass && distanceBetween(enemy.position, this.state.player.position) <= enemyLockRange) {
-          enemy.mode = "chase";
-          enemy.interestDuration = 5 + Math.random() * 10;
-          enemy.interestRemaining = enemy.interestDuration;
-        }
-      } else if (enemy.mode === "chase") {
-        enemy.interestRemaining -= dt;
-
-        if (enemy.interestRemaining <= 0) {
-          this.convertEnemyToFood(enemy);
-          expiredIds.push(enemy.id);
-          continue;
-        }
-      }
-
-      const direction =
-        enemy.mode === "chase"
-          ? normalize({
-              x: this.state.player.position.x - enemy.position.x,
-              y: this.state.player.position.y - enemy.position.y,
-            })
-          : enemy.mode === "wander"
-            ? enemy.wanderDirection
-            : enemy.leaveDirection;
-      const speed = enemy.mode === "wander" ? enemyWanderSpeed : enemySpeed;
-
-      enemy.velocity.x = direction.x * speed;
-      enemy.velocity.y = direction.y * speed;
-      enemy.position.x += enemy.velocity.x * dt;
-      enemy.position.y += enemy.velocity.y * dt;
-    }
-
-    if (expiredIds.length > 0) {
-      const expired = new Set(expiredIds);
-      this.state.enemies = this.state.enemies.filter((enemy) => !expired.has(enemy.id));
-    }
-
-    // Cull using player OR camera: the camera lags the player, so "distance to camera only" could
-    // delete enemies that are still near the player while moving fast — felt like spawns vanished.
-    const maximumDistance = Math.hypot(this.viewport.width, this.viewport.height) + 1100;
-    this.state.enemies = this.state.enemies.filter((enemy) => {
-      const nearPlayer =
-        distanceBetween(enemy.position, this.state.player.position) < maximumDistance;
-      const nearCamera = distanceBetween(enemy.position, this.state.camera) < maximumDistance;
-
-      return nearPlayer || nearCamera;
-    });
-  }
-
-  private spawnEnemy(): void {
-    const distance = Math.hypot(this.viewport.width, this.viewport.height) * 0.58 + 280;
-    const angle = Math.random() * Math.PI * 2;
-    const value = Math.max(1, Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN));
-    const interestDuration = 5 + Math.random() * 10;
-    const origin = this.state.player.position;
-
-    this.state.enemies.push({
-      id: this.state.nextEnemyId,
-      position: {
-        x: origin.x + Math.cos(angle) * distance,
-        y: origin.y + Math.sin(angle) * distance,
-      },
-      velocity: { x: 0, y: 0 },
-      value,
-      radius: radiusForValue(value) + 8,
-      phase: Math.random() * Math.PI * 2,
-      mode: "wander",
-      interestDuration,
-      interestRemaining: interestDuration,
-      wanderDirection: randomDirection(),
-      wanderTimer: 1.4 + Math.random() * 3.2,
-      leaveDirection: { x: 0, y: 1 },
-    });
-    this.state.nextEnemyId += 1;
-  }
-
-  private resolveEnemyCollisions(): void {
-    if (this.state.player.clump.length === 0) {
-      return;
-    }
-
-    for (let index = this.state.enemies.length - 1; index >= 0; index -= 1) {
-      const enemy = this.state.enemies[index];
-
-      if (enemy.mode !== "chase") {
-        continue;
-      }
-
-      const distance = distanceToClump(enemy.position, this.state.player);
-
-      if (distance > enemy.radius) {
-        continue;
-      }
-
-      const consumed = this.subtractPlayerMass(enemy.value);
-
-      if (consumed >= enemy.value) {
-        this.state.enemies.splice(index, 1);
-      } else {
-        enemy.value -= consumed;
-        enemy.radius = radiusForValue(enemy.value) + 8;
-        enemy.mode = "leave";
-        enemy.leaveDirection = normalize({
-          x: enemy.position.x - this.state.player.position.x,
-          y: enemy.position.y - this.state.player.position.y,
-        });
-      }
-
-      this.state.shockwaves.push({
-        age: 0,
-        duration: 0.32,
-        origin: { ...enemy.position },
-        maxRadius: 130 + enemy.value * 18,
-      });
-
-      this.stripStragglerOnesBelowSpawnFloor();
-      this.enforceObsoletePreviousTierInWorld();
-      this.bumpOrphanedFoodToIncrementFloor();
-    }
-  }
-
-  /** Food below the increment spawn floor with no matching particles left in the clump bumps to the floor (enemy minus, etc.). */
-  private bumpOrphanedFoodToIncrementFloor(): void {
-    const baseValue = Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN);
-
-    for (const food of this.state.foods) {
-      if (food.value >= baseValue) {
-        continue;
-      }
-
-      if (this.countParticles(food.value) > 0) {
-        continue;
-      }
-
-      food.value = baseValue;
-      food.radius = 28 + Math.sqrt(food.value) * 3;
-      this.state.shockwaves.push({
-        age: 0,
-        duration: 0.3,
-        origin: { ...food.position },
-        maxRadius: 120 + food.value * 14,
-      });
-    }
-  }
-
-  /** When spawn floor is above 1, remove lone 1s left after minus hits (e.g. 4 − 3) so they do not linger. */
-  private stripStragglerOnesBelowSpawnFloor(): void {
-    if (this.state.upgrades.incrementLevel + 1 <= 1) {
-      return;
-    }
-
-    this.state.player.clump = this.state.player.clump.filter((particle) => particle.value !== 1);
-  }
-
-  private subtractPlayerMass(amount: number): number {
-    let remaining = amount;
-    let consumed = 0;
-    const sorted = [...this.state.player.clump].sort((a, b) => b.value - a.value);
-    const emptied = new Set<number>();
-
-    for (const particle of sorted) {
-      if (remaining <= 0) {
-        break;
-      }
-
-      const taken = Math.min(particle.value, remaining);
-      particle.value -= taken;
-      remaining -= taken;
-      consumed += taken;
-
-      if (particle.value <= 0) {
-        emptied.add(particle.id);
-      } else {
-        particle.radius = radiusForValue(particle.value);
-      }
-    }
-
-    this.state.player.clump = this.state.player.clump.filter((particle) => !emptied.has(particle.id));
-    return consumed;
-  }
-
-  private updateShockwaves(dt: number): void {
-    for (const shockwave of this.state.shockwaves) {
-      shockwave.age += dt;
-
-      if (shockwave.anchor === "player" && shockwave.offset) {
-        shockwave.origin = {
-          x: this.state.player.position.x + shockwave.offset.x,
-          y: this.state.player.position.y + shockwave.offset.y,
-        };
-      }
-    }
-
-    this.state.shockwaves = this.state.shockwaves.filter(
-      (shockwave) => shockwave.age < shockwave.duration,
-    );
-  }
-
-  private updateMergeProgress(): void {
-    const progresses: MergeProgress[] = [];
-    let candidate = 1;
-
-    for (let value = this.state.player.discoveredMaxValue; value >= 1; value -= 1) {
-      if (value >= 10) {
-        continue;
-      }
-
-      const count = this.countParticles(value);
-      const ready = count >= mergeThreshold;
-
-      progresses.push({
-        value,
-        count,
-        threshold: mergeThreshold,
-        ready,
-      });
-
-      if (ready && candidate === 1) {
-        candidate = value;
-      }
-    }
-
-    if (progresses.length === 0) {
-      this.state.mergeProgresses = [];
-      this.state.mergeCandidateValue = 1;
-      this.state.mergeReady = false;
-      return;
-    }
-
-    this.state.mergeProgresses = progresses;
-    this.state.mergeCandidateValue = candidate;
-    this.state.mergeReady = progresses.some((progress) => progress.ready);
-  }
-
-  private updateUpgradeProgress(): void {
-    const spawnRateLevel = this.state.upgrades.spawnRateLevel;
-    const incrementLevel = this.state.upgrades.incrementLevel;
-    const speedLevel = this.state.upgrades.speedLevel;
-    const expandLevel = this.state.upgrades.expandLevel;
-    const spawnRateMaxed = spawnRateLevel >= spawnRateCosts.length;
-    const incrementMaxed = incrementLevel >= maxIncrementLevel;
-    const speedMaxed = speedLevel >= speedCosts.length;
-    const expandMaxed = expandLevel >= maxExpandLevel;
-    const spawnRateCostBase =
-      spawnRateCosts[Math.min(spawnRateLevel, spawnRateCosts.length - 1)];
-    const incrementCostBase = incrementCosts[Math.min(incrementLevel, incrementCosts.length - 1)];
-    const speedCostBase = speedCosts[Math.min(speedLevel, speedCosts.length - 1)];
-    const spawnBillDigit = Math.min(
-      Math.max(incrementLevel + 1, MIN_UPGRADE_BILL_DIGIT),
-      MAX_INCREMENT_SPAWN,
-    );
-    const spawnRateCostSpec = billedUpgradeCost(spawnRateCostBase, spawnBillDigit, true);
-    const incrementCostSpec = billedUpgradeCost(incrementCostBase, spawnBillDigit, true);
-    const speedCostSpec = billedUpgradeCost(speedCostBase, spawnBillDigit, true);
-    const expandCostSpec = billedUpgradeCost(expandCostTier1, MAX_CLUMP_VALUE, false);
-    const spawnRateMultiplier =
-      spawnRateMultipliers[Math.min(spawnRateLevel, spawnRateMultipliers.length - 1)];
-    const speedMultiplier = speedMultipliers[Math.min(speedLevel, speedMultipliers.length - 1)];
-    const spawnValue = Math.min(incrementLevel + 1, MAX_INCREMENT_SPAWN);
-    const upgrades: UpgradeProgress[] = [
-      {
-        kind: "spawnRate",
-        name: "Spawn Rate",
-        detail: `${spawnRateMultiplier.toFixed(2)}x more numbers`,
-        costAmount: spawnRateCostSpec.amount,
-        costValue: spawnRateCostSpec.value,
-        progress: spawnRateMaxed
-          ? 1
-          : Math.min(this.countParticles(spawnRateCostSpec.value) / spawnRateCostSpec.amount, 1),
-        canPurchase:
-          !spawnRateMaxed && this.countParticles(spawnRateCostSpec.value) >= spawnRateCostSpec.amount,
-        isMaxed: spawnRateMaxed,
-      },
-      {
-        kind: "increment",
-        name: "Increment",
-        detail: incrementMaxed ? "Numbers max at 8" : `Numbers can start at ${spawnValue}`,
-        costAmount: incrementCostSpec.amount,
-        costValue: incrementCostSpec.value,
-        progress: incrementMaxed
-          ? 1
-          : Math.min(this.countParticles(incrementCostSpec.value) / incrementCostSpec.amount, 1),
-        canPurchase:
-          !incrementMaxed &&
-          this.countParticles(incrementCostSpec.value) >= incrementCostSpec.amount,
-        isMaxed: incrementMaxed,
-      },
-      {
-        kind: "speed",
-        name: "Speed",
-        detail: `${speedMultiplier.toFixed(2)}x movement speed`,
-        costAmount: speedCostSpec.amount,
-        costValue: speedCostSpec.value,
-        progress: speedMaxed
-          ? 1
-          : Math.min(this.countParticles(speedCostSpec.value) / speedCostSpec.amount, 1),
-        canPurchase:
-          !speedMaxed && this.countParticles(speedCostSpec.value) >= speedCostSpec.amount,
-        isMaxed: speedMaxed,
-      },
-      {
-        kind: "expand",
-        name: "Expand",
-        detail: "(coming soon)",
-        costAmount: expandCostSpec.amount,
-        costValue: expandCostSpec.value,
-        progress: expandMaxed
-          ? 1
-          : Math.min(this.countParticles(expandCostSpec.value) / expandCostSpec.amount, 1),
-        canPurchase:
-          !expandMaxed && this.countParticles(expandCostSpec.value) >= expandCostSpec.amount,
-        isMaxed: expandMaxed,
-      },
-    ];
-
-    this.state.upgradeProgresses = upgrades;
-  }
-
-  private spendCurrency(amount: number, value: number): boolean {
-    if (this.countParticles(value) < amount) {
-      return false;
-    }
-
-    let remaining = amount;
-    const spentIds = new Set<number>();
-
-    for (const particle of this.state.player.clump) {
-      if (remaining <= 0) {
-        break;
-      }
-
-      if (particle.value === value) {
-        remaining -= 1;
-        spentIds.add(particle.id);
-      }
-    }
-
-    this.state.player.clump = this.state.player.clump.filter((particle) => !spentIds.has(particle.id));
-    return true;
-  }
-
-  private convertOutdatedFood(newBaseValue: number): void {
-    for (const food of this.state.foods) {
-      if (food.value >= newBaseValue) {
-        continue;
-      }
-
-      food.value = newBaseValue;
-      food.radius = 28 + Math.sqrt(newBaseValue) * 3;
-      this.state.shockwaves.push({
-        age: 0,
-        duration: 0.28,
-        origin: { ...food.position },
-        maxRadius: 120 + newBaseValue * 14,
-      });
-    }
-
-    this.enforceObsoletePreviousTierInWorld();
-  }
-
-  /** When increment is n and the clump has no (n-1), bump all world (n-1) enemies and food to n. */
-  private enforceObsoletePreviousTierInWorld(): void {
-    const incrementLevel = this.state.upgrades.incrementLevel;
-    const n = incrementLevel + 1;
-
-    if (incrementLevel < 1) {
-      return;
-    }
-
-    const previousValue = n - 1;
-
-    if (this.countParticles(previousValue) > 0) {
-      return;
-    }
-
-    let changed = false;
-
-    for (const enemy of this.state.enemies) {
-      if (enemy.value !== previousValue) {
-        continue;
-      }
-
-      enemy.value = Math.min(n, MAX_INCREMENT_SPAWN);
-      enemy.radius = radiusForValue(enemy.value) + 8;
-      changed = true;
-      this.state.shockwaves.push({
-        age: 0,
-        duration: 0.34,
-        origin: { ...enemy.position },
-        maxRadius: 140 + enemy.value * 16,
-      });
-    }
-
-    for (const food of this.state.foods) {
-      if (food.value !== previousValue) {
-        continue;
-      }
-
-      food.value = Math.min(n, MAX_INCREMENT_SPAWN);
-      food.radius = 28 + Math.sqrt(food.value) * 3;
-      changed = true;
-      this.state.shockwaves.push({
-        age: 0,
-        duration: 0.3,
-        origin: { ...food.position },
-        maxRadius: 120 + food.value * 14,
-      });
-    }
-
-    if (changed) {
-      this.updateMergeProgress();
-    }
-  }
-
-  private convertEnemyToFood(enemy: { position: Vec2; value: number; phase: number }): void {
-    this.state.shockwaves.push({
-      age: 0,
-      duration: 0.38,
-      origin: { ...enemy.position },
-      maxRadius: 150 + enemy.value * 20,
-    });
-    this.state.foods.push(this.createFoodAt(enemy.position, enemy.value, enemy.phase));
-  }
-
-  private createFoodAt(position: Vec2, value: number, phase: number): Food {
-    const food: Food = {
-      id: this.state.nextFoodId,
-      position: { ...position },
-      value,
-      radius: 28 + Math.sqrt(value) * 3,
-      phase,
-    };
-    this.state.nextFoodId += 1;
-
-    return food;
-  }
-
-  private countParticles(value: number): number {
-    return this.state.player.clump.filter((particle) => particle.value === value).length;
-  }
-
-  /**
-   * If merging removed the last `mergedValue` from the clump while the spawn floor is higher,
-   * any world food still showing that digit is obsolete — bump it (with shockwave) to match play.
-   */
-  private bumpFoodWhenMergedDigitObsoleted(mergedValue: number): void {
-    const spawnFloor = Math.min(this.state.upgrades.incrementLevel + 1, MAX_INCREMENT_SPAWN);
-
-    if (spawnFloor <= mergedValue) {
-      return;
-    }
-
-    if (this.countParticles(mergedValue) > 0) {
-      return;
-    }
-
-    const target = Math.min(Math.max(mergedValue + 1, spawnFloor), MAX_INCREMENT_SPAWN);
-
-    for (const food of this.state.foods) {
-      if (food.value !== mergedValue) {
-        continue;
-      }
-
-      food.value = target;
-      food.radius = 28 + Math.sqrt(target) * 3;
-      this.state.shockwaves.push({
-        age: 0,
-        duration: 0.28,
-        origin: { ...food.position },
-        maxRadius: 120 + target * 14,
-      });
-    }
-  }
-
-  private performMerge(value: number): void {
-    if (value >= MAX_CLUMP_VALUE) {
-      return;
-    }
-
-    const player = this.state.player;
-    const mergeable = player.clump.filter((particle) => particle.value === value).slice(0, mergeThreshold);
-
-    if (mergeable.length < mergeThreshold) {
-      return;
-    }
-
-    const mergeIds = new Set(mergeable.map((particle) => particle.id));
-    const origin = averageLocalPosition(mergeable);
-    const nextValue = value + 1;
-
-    player.clump = player.clump.filter((particle) => !mergeIds.has(particle.id));
-    player.clump.push({
-      id: player.nextParticleId,
-      localPosition: origin,
-      velocity: averageVelocity(mergeable),
-      value: nextValue,
-      radius: radiusForValue(nextValue),
-      angleSeed: Math.random() * Math.PI * 2,
-    });
-    player.nextParticleId += 1;
-    player.discoveredMaxValue = Math.max(player.discoveredMaxValue, nextValue);
-    this.updateMergeProgress();
-    this.bumpFoodWhenMergedDigitObsoleted(value);
-    this.state.shockwaves.push({
-      age: 0,
-      duration: 0.48,
-      origin: {
-        x: player.position.x + origin.x,
-        y: player.position.y + origin.y,
-      },
-      maxRadius: 220 + nextValue * 30,
-    });
-  }
-}
-
-function distanceBetween(a: Vec2, b: Vec2): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-function normalize(vector: Vec2): Vec2 {
-  const length = Math.hypot(vector.x, vector.y);
-
-  if (length === 0) {
-    return { x: 1, y: 0 };
-  }
-
-  return {
-    x: vector.x / length,
-    y: vector.y / length,
-  };
-}
-
-function randomDirection(): Vec2 {
-  const angle = Math.random() * Math.PI * 2;
-
-  return {
-    x: Math.cos(angle),
-    y: Math.sin(angle),
-  };
-}
-
-function distanceToClump(point: Vec2, player: GameState["player"]): number {
-  if (player.clump.length === 0) {
-    return distanceBetween(point, player.position) - 18;
-  }
-
-  let closest = currentClumpRadius(player);
-
-  for (const particle of player.clump) {
-    const worldPosition = {
-      x: player.position.x + particle.localPosition.x,
-      y: player.position.y + particle.localPosition.y,
-    };
-
-    closest = Math.min(closest, distanceBetween(point, worldPosition) - particle.radius);
-  }
-
-  return closest;
-}
-
-function averageLocalPosition(particles: ClumpParticle[]): Vec2 {
-  return particles.reduce(
-    (position, particle) => {
-      position.x += particle.localPosition.x / particles.length;
-      position.y += particle.localPosition.y / particles.length;
-      return position;
-    },
-    { x: 0, y: 0 },
-  );
-}
-
-function averageVelocity(particles: ClumpParticle[]): Vec2 {
-  return particles.reduce(
-    (velocity, particle) => {
-      velocity.x += particle.velocity.x / particles.length;
-      velocity.y += particle.velocity.y / particles.length;
-      return velocity;
-    },
-    { x: 0, y: 0 },
-  );
 }

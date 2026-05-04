@@ -28,6 +28,7 @@ body {
 
 #app {
   position: relative;
+  touch-action: none;
 }
 
 #game-canvas {
@@ -35,6 +36,7 @@ body {
   width: 100%;
   height: 100%;
   background: #0a0a0a;
+  touch-action: none;
 }
 
 #game-ui {
@@ -47,10 +49,10 @@ body {
 
 .panel {
   position: absolute;
-  border: 1px solid rgba(232, 227, 219, 0.12);
-  background: rgba(19, 19, 18, 0.84);
+  border: 1px solid rgba(232, 227, 219, 0.1);
+  background: rgba(14, 14, 16, 0.36);
   box-shadow: none;
-  backdrop-filter: blur(18px);
+  pointer-events: auto;
 }
 
 .upgrade-panel {
@@ -290,9 +292,21 @@ body {
 }
 
 .ui-button:not(:disabled):hover {
-  border-color: rgba(13, 110, 63, 0.72);
-  color: #fff6ef;
-  background: rgba(13, 110, 63, 0.16);
+  border-color: rgba(232, 227, 219, 0.3);
+  color: rgba(255, 252, 247, 0.96);
+  background: rgba(232, 227, 219, 0.1);
+}
+
+.purchase-button:not(:disabled):hover {
+  border-color: rgba(18, 32, 42, 0.22);
+  background: #c4d5d3;
+  color: #050d14;
+}
+
+.merge-panel.is-ready .merge-button:not(:disabled):hover {
+  border-color: rgba(95, 155, 125, 0.55);
+  background: rgba(22, 68, 48, 0.22);
+  color: #f4fbf6;
 }
 
 .ui-button:disabled {
@@ -303,4 +317,100 @@ body {
 .merge-button {
   min-width: 126px;
   height: 34px;
+}
+
+/* Compact HUD + room for touch movement on phones */
+@media (max-width: 720px) {
+  .upgrade-panel {
+    top: 6px;
+    left: 6px;
+    width: min(168px, calc(46vw - 8px));
+    max-width: 46vw;
+    max-height: min(42vh, 280px);
+    padding: 6px 8px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .upgrade-card {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+
+  .upgrade-copy span:first-child {
+    transform: scale(1.02, 1.2);
+    font-size: 11px;
+  }
+
+  .upgrade-copy span:last-child {
+    font-size: 7px;
+    letter-spacing: 0.04em;
+  }
+
+  .purchase-line {
+    grid-template-columns: 1fr 76px;
+    gap: 4px;
+    margin-top: 5px;
+  }
+
+  .purchase-button {
+    width: 76px;
+    height: 26px;
+    gap: 6px;
+  }
+
+  .cost-amount {
+    font-size: 12px;
+  }
+
+  .cost-value {
+    transform: scale(1.05, 1.08);
+    font-size: 17px;
+  }
+
+  .progress-track {
+    height: 6px;
+  }
+
+  .merge-panel {
+    right: 6px;
+    bottom: 6px;
+    width: min(240px, calc(100vw - 12px));
+    max-width: calc(100vw - 12px);
+    padding: 8px 10px;
+    max-height: min(38vh, 260px);
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .evolution-list {
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .evolution-row-copy {
+    font-size: 8px;
+    gap: 8px;
+  }
+
+  .evolution-row-copy span:first-child {
+    font-size: 11px;
+    transform: scale(1.02, 1.18);
+  }
+
+  .merge-track {
+    height: 9px;
+  }
+
+  .merge-line {
+    margin-top: 8px;
+  }
+
+  .merge-button {
+    min-width: 100px;
+    height: 30px;
+    font-size: 9px;
+  }
 }

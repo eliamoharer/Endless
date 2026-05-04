@@ -1,4 +1,4 @@
-import type { ClumpParticle, PlayerState, Vec2 } from "./types";
+import type { ClumpParticle, PlayerState, Vec2 } from "../types";
 
 const coreAttraction = 9;
 const pairAttraction = 12;
@@ -110,7 +110,6 @@ export function updateClump(player: PlayerState, dt: number): void {
     particle.velocity.x *= damping;
     particle.velocity.y *= damping;
   }
-
 }
 
 export function radiusForValue(value: number): number {

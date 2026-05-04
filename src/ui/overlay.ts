@@ -61,13 +61,13 @@ export class GameOverlay {
   }
 
   update(state: GameState): void {
-    this.mergePanel.classList.toggle("is-ready", state.mergeReady);
+    const showMerge = state.mergeProgresses.length > 0;
+    this.mergePanel.hidden = !showMerge;
+    this.mergePanel.classList.toggle("is-ready", showMerge && state.mergeReady);
     this.renderUpgrades(state);
     this.renderEvolutionProgresses(state);
     this.mergeButton.disabled = !state.mergeReady;
-    this.mergeButton.textContent = state.mergeReady
-      ? `Merge ${state.mergeCandidateValue} -> ${state.mergeCandidateValue + 1}`
-      : "Merge";
+    this.mergeButton.textContent = state.mergeReady ? `Merge ${state.mergeCandidateValue}` : "Merge";
 
   }
 
@@ -119,7 +119,7 @@ export class GameOverlay {
           <div class="evolution-row${progress.ready ? " is-ready" : ""}">
             <div class="evolution-row-copy">
               <span>Number ${progress.value}</span>
-              <span>${progress.count} / ${progress.threshold} toward ${progress.value + 1}</span>
+              <span>${progress.count} / ${progress.threshold}</span>
             </div>
             <div class="progress-track merge-track">
               <div class="progress-fill merge-fill" style="width: ${fill}%"></div>

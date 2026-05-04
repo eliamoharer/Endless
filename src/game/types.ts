@@ -45,7 +45,8 @@ export type Shockwave = {
   duration: number;
   origin: Vec2;
   maxRadius: number;
-  anchor?: "player";
+  anchor?: "player" | "enemy";
+  enemyId?: number;
   offset?: Vec2;
 };
 
