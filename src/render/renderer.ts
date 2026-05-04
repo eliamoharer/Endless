@@ -15,8 +15,22 @@ type GridNode = {
   tension: number;
 };
 
+const VIGNETTE_WARMUP_FRAMES = 56;
+/** Frames longer than this (ms) count toward disabling the vignette on weak devices. */
+const VIGNETTE_SLOW_FRAME_MS = 48;
+/** Recover the streak when the device is comfortably keeping pace. */
+const VIGNETTE_FAST_FRAME_MS = 22;
+const VIGNETTE_SLOW_STREAK_DISABLE = 10;
+
 export class CanvasRenderer {
   private readonly context: CanvasRenderingContext2D;
+  private readonly prefersReducedMotion: MediaQueryList;
+  private vignetteLayer: HTMLCanvasElement | null = null;
+  /** Cached radial fill; rebuilt on resize only (cheap each frame: one drawImage). */
+  private vignetteDrawEnabled = true;
+  private vignettePerfStreak = 0;
+  private vignetteWarmupFrames = VIGNETTE_WARMUP_FRAMES;
+  private lastRenderTimestamp = 0;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const context = canvas.getContext("2d");
@@ -26,6 +40,10 @@ export class CanvasRenderer {
     }
 
     this.context = context;
+    this.prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (this.prefersReducedMotion.matches) {
+      this.vignetteDrawEnabled = false;
+    }
   }
 
   resize(): Viewport {
@@ -39,10 +57,25 @@ export class CanvasRenderer {
     this.canvas.style.height = `${height}px`;
     this.context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
 
-    return { width, height, pixelRatio };
+    const viewport: Viewport = { width, height, pixelRatio };
+
+    if (!this.prefersReducedMotion.matches) {
+      this.vignetteDrawEnabled = true;
+      this.vignettePerfStreak = 0;
+      this.vignetteWarmupFrames = VIGNETTE_WARMUP_FRAMES;
+      this.lastRenderTimestamp = 0;
+      this.rebuildVignetteLayer(viewport);
+    } else {
+      this.vignetteDrawEnabled = false;
+      this.vignetteLayer = null;
+    }
+
+    return viewport;
   }
 
   render(state: GameState, viewport: Viewport): void {
+    this.updateVignetteFromFrameTiming();
+
     const ctx = this.context;
     const influences = this.collectGridInfluences(state, viewport);
 
@@ -59,6 +92,71 @@ export class CanvasRenderer {
     }
 
     this.drawPlayerMass(ctx, state, viewport);
+  }
+
+  private updateVignetteFromFrameTiming(): void {
+    const now = performance.now();
+
+    if (this.vignetteDrawEnabled && !this.prefersReducedMotion.matches) {
+      if (this.lastRenderTimestamp > 0) {
+        const frameMs = now - this.lastRenderTimestamp;
+
+        if (this.vignetteWarmupFrames > 0) {
+          this.vignetteWarmupFrames -= 1;
+        } else if (frameMs > VIGNETTE_SLOW_FRAME_MS) {
+          this.vignettePerfStreak += frameMs > VIGNETTE_SLOW_FRAME_MS * 1.35 ? 2 : 1;
+        } else if (frameMs < VIGNETTE_FAST_FRAME_MS) {
+          this.vignettePerfStreak = Math.max(0, this.vignettePerfStreak - 3);
+        }
+
+        if (this.vignettePerfStreak >= VIGNETTE_SLOW_STREAK_DISABLE) {
+          this.vignetteDrawEnabled = false;
+          this.vignetteLayer = null;
+        }
+      }
+    }
+
+    this.lastRenderTimestamp = now;
+  }
+
+  private rebuildVignetteLayer(viewport: Viewport): void {
+    const w = viewport.width;
+    const h = viewport.height;
+
+    if (w <= 0 || h <= 0) {
+      this.vignetteLayer = null;
+      return;
+    }
+
+    let layer = this.vignetteLayer;
+
+    if (!layer || layer.width !== w || layer.height !== h) {
+      layer = document.createElement("canvas");
+      layer.width = w;
+      layer.height = h;
+      this.vignetteLayer = layer;
+    }
+
+    const vctx = layer.getContext("2d");
+
+    if (!vctx) {
+      this.vignetteLayer = null;
+      return;
+    }
+
+    const gradient = vctx.createRadialGradient(
+      w * 0.5,
+      h * 0.54,
+      0,
+      w * 0.5,
+      h * 0.54,
+      Math.max(w, h) * 0.86,
+    );
+    gradient.addColorStop(0, "rgba(216, 230, 229, 0.035)");
+    gradient.addColorStop(0.62, "rgba(216, 230, 229, 0.016)");
+    gradient.addColorStop(1, "rgba(216, 230, 229, 0)");
+    vctx.fillStyle = gradient;
+    vctx.fillRect(0, 0, w, h);
   }
 
   private worldToScreen(position: Vec2, state: GameState, viewport: Viewport): Vec2 {
@@ -80,19 +178,9 @@ export class CanvasRenderer {
     ctx.fillStyle = "#0a0a0a";
     ctx.fillRect(0, 0, viewport.width, viewport.height);
 
-    const floorGradient = ctx.createRadialGradient(
-      viewport.width * 0.5,
-      viewport.height * 0.54,
-      0,
-      viewport.width * 0.5,
-      viewport.height * 0.54,
-      Math.max(viewport.width, viewport.height) * 0.86,
-    );
-    floorGradient.addColorStop(0, "rgba(216, 230, 229, 0.035)");
-    floorGradient.addColorStop(0.62, "rgba(216, 230, 229, 0.016)");
-    floorGradient.addColorStop(1, "rgba(216, 230, 229, 0)");
-    ctx.fillStyle = floorGradient;
-    ctx.fillRect(0, 0, viewport.width, viewport.height);
+    if (this.vignetteDrawEnabled && this.vignetteLayer) {
+      ctx.drawImage(this.vignetteLayer, 0, 0, viewport.width, viewport.height);
+    }
 
     const spacing = 66;
     const worldLeft = state.camera.x - viewport.width * 1.2;

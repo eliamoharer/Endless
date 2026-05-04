@@ -16,7 +16,7 @@ export const MAX_CLUMP_VALUE = 10;
 /** Upgrades bill from digit 2+ so first costs read as merged coins, not raw 1s. */
 export const MIN_UPGRADE_BILL_DIGIT = 2;
 
-export const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000].map((cost) => cost / 30);
+export const incrementCosts = [30, 300, 3000, 30000, 300000, 3000000, 30000000];
 export const spawnRateCosts = [10, 20, 100, 200, 1000, 2000, 10000, 100000, 1000000, 10000000, 100000000];
 export const spawnRateMultipliers = [1, 1.28, 1.66, 2.18, 2.92, 4.05, 5.85, 8.6, 12.6, 18.4, 26, 36];
 export const spawnCaps = [3, 4, 5, 6, 8, 11, 15, 20, 27, 36, 46, 56];

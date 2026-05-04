@@ -326,8 +326,8 @@ body {
     left: 6px;
     width: min(168px, calc(46vw - 8px));
     max-width: 46vw;
-    max-height: min(42vh, 280px);
-    padding: 6px 8px;
+    max-height: min(28vh, 186px);
+    padding: 6px 10px;
     overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -349,24 +349,33 @@ body {
   }
 
   .purchase-line {
-    grid-template-columns: 1fr 76px;
-    gap: 4px;
+    box-sizing: border-box;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
     margin-top: 5px;
+    padding: 0 2px;
+    align-items: center;
   }
 
   .purchase-button {
-    width: 76px;
-    height: 26px;
-    gap: 6px;
+    box-sizing: border-box;
+    width: auto;
+    min-width: 0;
+    max-width: 52px;
+    height: 22px;
+    padding: 0 4px;
+    gap: 3px;
+    justify-self: end;
+    margin-right: 2px;
   }
 
   .cost-amount {
-    font-size: 12px;
+    font-size: 10px;
   }
 
   .cost-value {
-    transform: scale(1.05, 1.08);
-    font-size: 17px;
+    transform: scale(1.02, 1.06);
+    font-size: 14px;
   }
 
   .progress-track {
